@@ -1,0 +1,480 @@
+--[[
+    ============================================================
+    FPS BOOST - SMART AGGRESSIVE MODE (MOBILE TỐI ƯU)
+    Tối ưu cho chipset MediaTek Helio G91 Ultra / GPU Mali-G52 MP2
+    ============================================================
+    Đặt script này (LocalScript) vào StarterPlayerScripts hoặc StarterGui.
+
+    "SMART": Script tự phân biệt vật thể Map/Môi trường với vật thể
+    Nhân vật người chơi / NPC / Boss (dựa vào Humanoid trong Model tổ tiên,
+    hoặc Tag thủ công: "NPC", "Boss", "KeepTexture", "Character" — dùng cho
+    rig đặc biệt không có Humanoid).
+    - Vật thể MAP  -> xoá/ẩn Texture, đổi Material SmoothPlastic (giảm tải GPU).
+    - Vật thể NHÂN VẬT/NPC/BOSS -> GIỮ NGUYÊN toàn bộ Texture/Decal/Skin
+      để không bị mất hình ảnh nhân vật.
+]]
+
+-- ============================================================
+-- 1. LẤY CÁC SERVICE CẦN THIẾT
+-- ============================================================
+local Players            = game:GetService("Players")
+local Lighting           = game:GetService("Lighting")
+local Workspace          = game:GetService("Workspace")
+local UserInputService   = game:GetService("UserInputService")
+local RunService         = game:GetService("RunService")
+local CollectionService  = game:GetService("CollectionService")
+
+local LocalPlayer = Players.LocalPlayer
+local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
+
+-- ============================================================
+-- 2. BIẾN TRẠNG THÁI & BỘ NHỚ LƯU THUỘC TÍNH GỐC
+-- ============================================================
+local isOptimized = false                  -- Trạng thái bật/tắt tối ưu
+local descendantConnection = nil           -- Kết nối theo dõi vật thể mới sinh ra
+
+-- Bảng lưu lại thuộc tính gốc của từng Instance để khôi phục sau này
+-- Cấu trúc: originalData[instance] = { key = value, ... }
+local originalData = setmetatable({}, { __mode = "k" }) -- weak table để tránh rò rỉ bộ nhớ
+
+-- Lưu lại cấu hình gốc của Lighting/Terrain để khôi phục toàn bộ
+local originalLighting = {}
+local originalTerrain = {}
+local originalQuality = nil
+
+-- ============================================================
+-- 3. HÀM TIỆN ÍCH: LƯU & GHI THUỘC TÍNH AN TOÀN (KHÔNG BAO GIỜ LỖI)
+-- ============================================================
+local function safeSet(instance, property, value)
+    -- pcall giúp script không bị lỗi nếu thuộc tính không tồn tại hoặc không thể gán
+    local ok = pcall(function()
+        instance[property] = value
+    end)
+    return ok
+end
+
+local function safeGet(instance, property)
+    local ok, result = pcall(function()
+        return instance[property]
+    end)
+    if ok then
+        return result
+    end
+    return nil
+end
+
+-- Lưu giá trị gốc của 1 thuộc tính (chỉ lưu nếu chưa từng lưu, tránh ghi đè bởi lần bật/tắt nhiều lần)
+local function rememberOriginal(instance, property)
+    if not originalData[instance] then
+        originalData[instance] = {}
+    end
+    if originalData[instance][property] == nil then
+        originalData[instance][property] = safeGet(instance, property)
+    end
+end
+
+-- ============================================================
+-- 4. HÀM XỬ LÝ TỐI ƯU CHO TỪNG LOẠI VẬT THỂ
+-- ============================================================
+
+-- Số cấp Ancestor tối đa cần duyệt lên để tìm Model chứa Humanoid (giới hạn để đỡ tốn hiệu năng)
+local MAX_ANCESTOR_SCAN = 6
+
+-- Danh sách Tag (CollectionService) dùng để đánh dấu thủ công các vật thể cần GIỮ NGUYÊN texture,
+-- áp dụng cho trường hợp Boss/NPC đặc biệt KHÔNG có Humanoid (VD: tượng, rương, trụ pháp thuật...).
+-- Cách dùng trong Studio: chọn Model -> mở "Tag Editor" -> gõ 1 trong các tên bên dưới -> Add.
+local KEEP_TEXTURE_TAGS = { "NPC", "Boss", "KeepTexture", "Character" }
+
+-- Kiểm tra xem 1 Instance (hoặc tổ tiên của nó) có được gắn Tag bảo vệ hay không
+local function hasProtectedTag(instance)
+    for _, tagName in ipairs(KEEP_TEXTURE_TAGS) do
+        local ok, result = pcall(function()
+            return CollectionService:HasTag(instance, tagName)
+        end)
+        if ok and result then
+            return true
+        end
+    end
+    return false
+end
+
+-- Cache kết quả kiểm tra để không phải duyệt lại nhiều lần cho cùng 1 vật thể
+local characterCheckCache = setmetatable({}, { __mode = "k" })
+
+-- Kiểm tra 1 vật thể có thuộc về Nhân vật người chơi / NPC / Boss hay không.
+-- Quy tắc: nếu bất kỳ Model tổ tiên nào (trong phạm vi quét) có chứa Humanoid,
+-- HOẶC được gắn Tag bảo vệ thủ công (KEEP_TEXTURE_TAGS),
+-- thì vật thể đó được coi là "nhân vật" và PHẢI giữ nguyên Texture/Skin/Decal.
+local function isCharacterOrNPC(instance)
+    if characterCheckCache[instance] ~= nil then
+        return characterCheckCache[instance]
+    end
+
+    local current = instance
+    local result = false
+
+    for _ = 1, MAX_ANCESTOR_SCAN do
+        if not current then break end
+
+        if current:IsA("Model") then
+            -- Có Humanoid bên trong Model => đây là nhân vật/NPC/Boss, không phải vật thể map
+            if current:FindFirstChildOfClass("Humanoid") then
+                result = true
+                break
+            end
+            -- Một số NPC/Boss dùng AnimationController thay vì Humanoid (không di chuyển)
+            if current:FindFirstChildOfClass("AnimationController") and current:FindFirstChild("HumanoidRootPart") then
+                result = true
+                break
+            end
+        end
+
+        -- Kiểm tra Tag bảo vệ thủ công (dành cho Boss/NPC rig đặc biệt không có Humanoid)
+        if hasProtectedTag(current) then
+            result = true
+            break
+        end
+
+        current = current.Parent
+    end
+
+    characterCheckCache[instance] = result
+    return result
+end
+
+-- Tối ưu cho BasePart: đổi Material về SmoothPlastic, tắt phản chiếu
+-- CHỈ áp dụng cho vật thể thuộc Map/Môi trường, KHÔNG áp dụng cho Nhân vật/NPC/Boss
+local function optimizePart(part)
+    if not part:IsA("BasePart") then return end
+    if isCharacterOrNPC(part) then return end -- giữ nguyên skin nhân vật/NPC/Boss
+
+    rememberOriginal(part, "Material")
+    rememberOriginal(part, "Reflectance")
+    safeSet(part, "Material", Enum.Material.SmoothPlastic)
+    safeSet(part, "Reflectance", 0)
+end
+
+-- Tắt hiệu ứng hạt / khói / lửa / tia lửa / vệt sáng
+-- Chỉ tắt hiệu ứng thuộc Map (VD: đèn lửa trại, thác nước...),
+-- không tắt hiệu ứng kỹ năng/skill gắn trên nhân vật, NPC, Boss
+local function optimizeEffect(obj)
+    if not (obj:IsA("ParticleEmitter") or obj:IsA("Trail") or obj:IsA("Smoke")
+        or obj:IsA("Fire") or obj:IsA("Sparkles")) then
+        return
+    end
+    if isCharacterOrNPC(obj) then return end -- giữ hiệu ứng kỹ năng của nhân vật/Boss
+
+    rememberOriginal(obj, "Enabled")
+    safeSet(obj, "Enabled", false)
+end
+
+-- Ẩn Decal / Texture bằng cách set Transparency = 1
+-- CHỈ áp dụng cho Map/Môi trường. Texture/Decal/Skin của Nhân vật, NPC, Boss được giữ nguyên
+-- để không bị mất hình ảnh (VD: mặt nhân vật, trang phục, hoa văn Boss...)
+local function optimizeTexture(obj)
+    if isCharacterOrNPC(obj) then return end -- giữ nguyên texture/skin nhân vật, NPC, Boss
+
+    if obj:IsA("Decal") or obj:IsA("Texture") then
+        rememberOriginal(obj, "Transparency")
+        safeSet(obj, "Transparency", 1)
+    end
+
+    -- Với MeshPart có sẵn TextureID (thuộc map), hạ chất lượng render bằng RenderFidelity
+    if obj:IsA("MeshPart") then
+        rememberOriginal(obj, "RenderFidelity")
+        safeSet(obj, "RenderFidelity", Enum.RenderFidelity.Performance)
+    end
+end
+
+-- Hàm gộp: áp dụng toàn bộ tối ưu cho 1 Instance (dùng cho cả vật thể cũ và mới)
+local function optimizeInstance(obj)
+    optimizePart(obj)
+    optimizeEffect(obj)
+    optimizeTexture(obj)
+end
+
+-- ============================================================
+-- 5. TỐI ƯU LIGHTING (ÁNH SÁNG / HẬU KỲ)
+-- ============================================================
+local function captureOriginalLighting()
+    originalLighting = {
+        GlobalShadows = safeGet(Lighting, "GlobalShadows"),
+        FogEnd        = safeGet(Lighting, "FogEnd"),
+    }
+end
+
+local function optimizeLighting()
+    -- LƯU Ý: Script KHÔNG đụng vào Brightness/Ambient/ColorShift/OutdoorAmbient
+    -- (ánh sáng tĩnh cơ bản) để map không bị tối om khi tắt shadow/postfx.
+
+    -- Tắt đổ bóng toàn cục (giảm tải GPU đáng kể trên Mali-G52)
+    safeSet(Lighting, "GlobalShadows", false)
+
+    -- Đẩy khoảng cách sương mù ra rất xa để tránh hiệu ứng render sương mù
+    safeSet(Lighting, "FogEnd", 9e9)
+
+    -- Tắt toàn bộ hiệu ứng hậu kỳ (PostEffect) - rất tốn GPU trên máy yếu
+    for _, effect in ipairs(Lighting:GetChildren()) do
+        if effect:IsA("BlurEffect") or effect:IsA("SunRaysEffect")
+            or effect:IsA("ColorCorrectionEffect") or effect:IsA("BloomEffect")
+            or effect:IsA("DepthOfFieldEffect") then
+            rememberOriginal(effect, "Enabled")
+            safeSet(effect, "Enabled", false)
+        end
+    end
+end
+
+local function restoreLighting()
+    if originalLighting.GlobalShadows ~= nil then
+        safeSet(Lighting, "GlobalShadows", originalLighting.GlobalShadows)
+    end
+    if originalLighting.FogEnd ~= nil then
+        safeSet(Lighting, "FogEnd", originalLighting.FogEnd)
+    end
+
+    for _, effect in ipairs(Lighting:GetChildren()) do
+        if effect:IsA("BlurEffect") or effect:IsA("SunRaysEffect")
+            or effect:IsA("ColorCorrectionEffect") or effect:IsA("BloomEffect")
+            or effect:IsA("DepthOfFieldEffect") then
+            local saved = originalData[effect]
+            if saved and saved.Enabled ~= nil then
+                safeSet(effect, "Enabled", saved.Enabled)
+            else
+                safeSet(effect, "Enabled", true) -- mặc định bật lại nếu không có dữ liệu gốc
+            end
+        end
+    end
+end
+
+-- ============================================================
+-- 6. TỐI ƯU TERRAIN (ĐỊA HÌNH / NƯỚC)
+-- ============================================================
+local function captureOriginalTerrain()
+    local terrain = Workspace:FindFirstChildOfClass("Terrain")
+    if not terrain then return end
+    originalTerrain = {
+        WaterWaveSize    = safeGet(terrain, "WaterWaveSize"),
+        WaterWaveSpeed   = safeGet(terrain, "WaterWaveSpeed"),
+        WaterReflectance = safeGet(terrain, "WaterReflectance"),
+        WaterTransparency= safeGet(terrain, "WaterTransparency"),
+    }
+end
+
+local function optimizeTerrain()
+    local terrain = Workspace:FindFirstChildOfClass("Terrain")
+    if not terrain then return end
+
+    safeSet(terrain, "WaterWaveSize", 0)
+    safeSet(terrain, "WaterWaveSpeed", 0)
+    safeSet(terrain, "WaterReflectance", 0)
+    safeSet(terrain, "WaterTransparency", 0)
+
+    -- Lưu ý: .Decoration của Terrain là thuộc tính ẩn (hidden property),
+    -- không thể chỉnh sửa bằng LocalScript thông thường trong môi trường game thật.
+    -- Hàm sethiddenproperty chỉ tồn tại trong một số công cụ thực thi script bên ngoài (executor),
+    -- việc sử dụng các công cụ đó có thể vi phạm Điều khoản dịch vụ của Roblox.
+    -- Vì vậy đoạn này được bỏ qua an toàn (pcall) để không gây lỗi và không khuyến khích dùng exploit.
+    pcall(function()
+        if typeof(sethiddenproperty) == "function" then
+            sethiddenproperty(terrain, "Decoration", false)
+        end
+    end)
+end
+
+local function restoreTerrain()
+    local terrain = Workspace:FindFirstChildOfClass("Terrain")
+    if not terrain then return end
+
+    if originalTerrain.WaterWaveSize ~= nil then
+        safeSet(terrain, "WaterWaveSize", originalTerrain.WaterWaveSize)
+    end
+    if originalTerrain.WaterWaveSpeed ~= nil then
+        safeSet(terrain, "WaterWaveSpeed", originalTerrain.WaterWaveSpeed)
+    end
+    if originalTerrain.WaterReflectance ~= nil then
+        safeSet(terrain, "WaterReflectance", originalTerrain.WaterReflectance)
+    end
+    if originalTerrain.WaterTransparency ~= nil then
+        safeSet(terrain, "WaterTransparency", originalTerrain.WaterTransparency)
+    end
+
+    pcall(function()
+        if typeof(sethiddenproperty) == "function" then
+            sethiddenproperty(terrain, "Decoration", true)
+        end
+    end)
+end
+
+-- ============================================================
+-- 7. TỐI ƯU CHẤT LƯỢNG RENDER (QUALITY LEVEL)
+-- ============================================================
+-- Lưu ý: settings().Rendering chỉ khả dụng trong môi trường có quyền cao
+-- (Roblox Studio / Plugin). Trong một game thật (LocalScript client),
+-- Roblox không cho phép script tự thay đổi QualityLevel vì lý do bảo mật/anti-cheat.
+-- Đoạn dưới đây được bọc trong pcall để không gây lỗi nếu không khả dụng.
+local function optimizeRenderQuality()
+    pcall(function()
+        originalQuality = settings().Rendering.QualityLevel
+        settings().Rendering.QualityLevel = Enum.QualityLevel.Level01
+    end)
+end
+
+local function restoreRenderQuality()
+    pcall(function()
+        if originalQuality then
+            settings().Rendering.QualityLevel = originalQuality
+        end
+    end)
+end
+
+-- ============================================================
+-- 8. QUÉT TOÀN BỘ WORKSPACE VÀ ÁP DỤNG TỐI ƯU
+-- ============================================================
+local function applyOptimizationToAll()
+    for _, obj in ipairs(Workspace:GetDescendants()) do
+        optimizeInstance(obj)
+    end
+end
+
+-- Khôi phục từng vật thể đã lưu dữ liệu gốc
+local function restoreAllInstances()
+    for instance, data in pairs(originalData) do
+        -- Kiểm tra vật thể còn tồn tại trong game không (tránh lỗi vật thể đã bị xoá)
+        if instance and instance.Parent then
+            for property, value in pairs(data) do
+                safeSet(instance, property, value)
+            end
+        end
+    end
+    -- Xoá bảng lưu trữ sau khi khôi phục xong
+    originalData = setmetatable({}, { __mode = "k" })
+end
+
+-- ============================================================
+-- 9. BẬT / TẮT CHẾ ĐỘ TỐI ƯU (AGGRESSIVE MODE)
+-- ============================================================
+local function enableOptimization()
+    captureOriginalLighting()
+    captureOriginalTerrain()
+
+    applyOptimizationToAll()
+    optimizeLighting()
+    optimizeTerrain()
+    optimizeRenderQuality()
+
+    -- Theo dõi vật thể mới được thêm vào game (VD: quái vật, vật phẩm spawn ra)
+    descendantConnection = Workspace.DescendantAdded:Connect(function(obj)
+        -- Dùng task.defer để đảm bảo thuộc tính của vật thể đã được thiết lập đầy đủ trước khi tối ưu
+        task.defer(function()
+            optimizeInstance(obj)
+        end)
+    end)
+end
+
+local function disableOptimization()
+    if descendantConnection then
+        descendantConnection:Disconnect()
+        descendantConnection = nil
+    end
+
+    restoreAllInstances()
+    restoreLighting()
+    restoreTerrain()
+    restoreRenderQuality()
+end
+
+-- ============================================================
+-- 10. TẠO GIAO DIỆN (GUI) CÓ THỂ KÉO THẢ
+-- ============================================================
+local screenGui = Instance.new("ScreenGui")
+screenGui.Name = "FPSBoostGui"
+screenGui.ResetOnSpawn = false
+screenGui.IgnoreGuiInset = true
+screenGui.Parent = PlayerGui
+
+local toggleButton = Instance.new("TextButton")
+toggleButton.Name = "ToggleButton"
+toggleButton.Size = UDim2.new(0, 150, 0, 50)
+toggleButton.Position = UDim2.new(0, 20, 0.5, -25) -- vị trí mặc định: giữa bên trái màn hình
+toggleButton.AnchorPoint = Vector2.new(0, 0)
+toggleButton.BackgroundColor3 = Color3.fromRGB(200, 40, 40) -- Đỏ = đang TẮT
+toggleButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+toggleButton.Font = Enum.Font.GothamBold
+toggleButton.TextSize = 16
+toggleButton.Text = "FPS Boost: OFF"
+toggleButton.AutoButtonColor = false
+toggleButton.Parent = screenGui
+
+local corner = Instance.new("UICorner")
+corner.CornerRadius = UDim.new(0, 10)
+corner.Parent = toggleButton
+
+-- ============================================================
+-- 11. LOGIC KÉO THẢ (DRAGGABLE) - HỖ TRỢ CẢ CẢM ỨNG & CHUỘT
+-- ============================================================
+local dragging = false
+local dragInput = nil
+local dragStart = nil
+local startPos = nil
+
+local function updateDrag(input)
+    local delta = input.Position - dragStart
+    toggleButton.Position = UDim2.new(
+        startPos.X.Scale, startPos.X.Offset + delta.X,
+        startPos.Y.Scale, startPos.Y.Offset + delta.Y
+    )
+end
+
+toggleButton.InputBegan:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1
+        or input.UserInputType == Enum.UserInputType.Touch then
+        dragging = true
+        dragStart = input.Position
+        startPos = toggleButton.Position
+
+        -- Ngắt theo dõi khi thả tay/chuột ra
+        input.Changed:Connect(function()
+            if input.UserInputState == Enum.UserInputState.End then
+                dragging = false
+            end
+        end)
+    end
+end)
+
+toggleButton.InputChanged:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseMovement
+        or input.UserInputType == Enum.UserInputType.Touch then
+        dragInput = input
+    end
+end)
+
+UserInputService.InputChanged:Connect(function(input)
+    if input == dragInput and dragging then
+        updateDrag(input)
+    end
+end)
+
+-- ============================================================
+-- 12. XỬ LÝ SỰ KIỆN NHẤN NÚT (BẬT / TẮT TỐI ƯU)
+-- ============================================================
+local isDragMove = false -- dùng để phân biệt giữa "kéo" và "nhấn" (tránh bật/tắt nhầm khi kéo)
+
+toggleButton.MouseButton1Click:Connect(function()
+    isOptimized = not isOptimized
+
+    if isOptimized then
+        toggleButton.Text = "FPS Boost: ON"
+        toggleButton.BackgroundColor3 = Color3.fromRGB(40, 180, 40) -- Xanh = đang BẬT
+        enableOptimization()
+    else
+        toggleButton.Text = "FPS Boost: OFF"
+        toggleButton.BackgroundColor3 = Color3.fromRGB(200, 40, 40) -- Đỏ = đang TẮT
+        disableOptimization()
+    end
+end)
+
+-- ============================================================
+-- HOÀN TẤT: Script sẵn sàng hoạt động.
+-- Người chơi bấm nút để bật/tắt chế độ tối ưu FPS, và có thể kéo nút
+-- đến vị trí không che tầm nhìn khi chơi game.
+-- ============================================================
