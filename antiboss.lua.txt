@@ -1,0 +1,243 @@
+--=====================================================
+-- LOCAL SCRIPT: Mobile Cow Menu (Anti-Drop only)
+-- Đặt trong StarterPlayer > StarterPlayerScripts
+--=====================================================
+
+local Players    = game:GetService("Players")
+local Workspace   = game:GetService("Workspace")
+
+local LocalPlayer = Players.LocalPlayer
+local backpack = LocalPlayer:WaitForChild("Backpack")
+
+--------------------------------------------------------
+-- Lấy nhân vật hiện tại (và tự cập nhật khi respawn)
+--------------------------------------------------------
+local character = LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
+local humanoid  = character:WaitForChild("Humanoid")
+
+LocalPlayer.CharacterAdded:Connect(function(newChar)
+	character = newChar
+	humanoid  = newChar:WaitForChild("Humanoid")
+	-- Character mới -> gắn lại theo dõi cho các Tool đã có sẵn trong Backpack
+	for _, tool in ipairs(backpack:GetChildren()) do
+		if tool:IsA("Tool") then
+			trackTool(tool)
+		end
+	end
+end)
+
+local antiDropEnabled = false
+
+--=====================================================
+-- 1. GIAO DIỆN (UI)
+--=====================================================
+
+local screenGui = Instance.new("ScreenGui")
+screenGui.Name = "CowMenuGui"
+screenGui.ResetOnSpawn = false
+screenGui.IgnoreGuiInset = true
+screenGui.Parent = LocalPlayer:WaitForChild("PlayerGui")
+
+--------------------------------------------------------
+-- Nút tròn (icon con bò) - đặt góc DƯỚI-PHẢI, chừa lề an toàn
+-- để không bị thanh điều khiển di động hoặc tai thỏ che mất
+--------------------------------------------------------
+local cowButton = Instance.new("TextButton")
+cowButton.Name = "CowButton"
+cowButton.Size = UDim2.new(0, 50, 0, 50)
+cowButton.AnchorPoint = Vector2.new(1, 1)
+cowButton.Position = UDim2.new(1, -20, 1, -120) -- cách đáy & mép phải, tránh nút nhảy/di chuyển mobile
+cowButton.BackgroundColor3 = Color3.fromRGB(40, 40, 40)
+cowButton.Text = "🐮"
+cowButton.TextScaled = true
+cowButton.Font = Enum.Font.SourceSansBold
+cowButton.ZIndex = 10
+cowButton.Parent = screenGui
+
+local cowCorner = Instance.new("UICorner")
+cowCorner.CornerRadius = UDim.new(1, 0)
+cowCorner.Parent = cowButton
+
+local cowStroke = Instance.new("UIStroke")
+cowStroke.Color = Color3.fromRGB(255, 255, 255)
+cowStroke.Thickness = 2
+cowStroke.Parent = cowButton
+
+--------------------------------------------------------
+-- Cửa sổ Pop-up (220 x 150)
+-- Neo theo góc DƯỚI-PHẢI của chính popup và đặt NGAY PHÍA TRÊN
+-- nút bò -> luôn nằm trọn trong màn hình, không bao giờ bị khuất
+--------------------------------------------------------
+local popup = Instance.new("Frame")
+popup.Name = "PopupMenu"
+popup.Size = UDim2.new(0, 220, 0, 150)
+popup.AnchorPoint = Vector2.new(1, 1)
+popup.Position = UDim2.new(1, -20, 1, -180) -- ngay trên nút bò, cách 10px
+popup.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
+popup.BorderSizePixel = 0
+popup.Visible = false
+popup.ZIndex = 10
+popup.Parent = screenGui
+
+local popupCorner = Instance.new("UICorner")
+popupCorner.CornerRadius = UDim.new(0, 12)
+popupCorner.Parent = popup
+
+local popupPadding = Instance.new("UIPadding")
+popupPadding.PaddingTop = UDim.new(0, 10)
+popupPadding.PaddingBottom = UDim.new(0, 10)
+popupPadding.PaddingLeft = UDim.new(0, 10)
+popupPadding.PaddingRight = UDim.new(0, 10)
+popupPadding.Parent = popup
+
+cowButton.MouseButton1Click:Connect(function()
+	popup.Visible = not popup.Visible
+end)
+
+--------------------------------------------------------
+-- Tiêu đề popup
+--------------------------------------------------------
+local titleLabel = Instance.new("TextLabel")
+titleLabel.Name = "TitleLabel"
+titleLabel.Size = UDim2.new(1, 0, 0, 24)
+titleLabel.BackgroundTransparency = 1
+titleLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
+titleLabel.TextScaled = true
+titleLabel.Font = Enum.Font.SourceSansBold
+titleLabel.TextXAlignment = Enum.TextXAlignment.Left
+titleLabel.Text = "🐮 Menu"
+titleLabel.ZIndex = 11
+titleLabel.Parent = popup
+
+--=====================================================
+-- 2. TOGGLE CHỐNG RƠI ĐỒ (ANTI-DROP)
+--=====================================================
+
+local toggleButton = Instance.new("TextButton")
+toggleButton.Name = "AntiDropToggle"
+toggleButton.Size = UDim2.new(1, 0, 0, 45)
+toggleButton.Position = UDim2.new(0, 0, 0, 40)
+toggleButton.BackgroundColor3 = Color3.fromRGB(150, 40, 40) -- đỏ = TẮT
+toggleButton.Text = "Chống Rơi Đồ: TẮT"
+toggleButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+toggleButton.TextScaled = true
+toggleButton.Font = Enum.Font.SourceSansBold
+toggleButton.ZIndex = 11
+toggleButton.Parent = popup
+
+local toggleCorner = Instance.new("UICorner")
+toggleCorner.CornerRadius = UDim.new(0, 8)
+toggleCorner.Parent = toggleButton
+
+local infoLabel = Instance.new("TextLabel")
+infoLabel.Name = "InfoLabel"
+infoLabel.Size = UDim2.new(1, 0, 0, 50)
+infoLabel.Position = UDim2.new(0, 0, 0, 90)
+infoLabel.BackgroundTransparency = 1
+infoLabel.TextColor3 = Color3.fromRGB(180, 180, 180)
+infoLabel.TextScaled = true
+infoLabel.TextWrapped = true
+infoLabel.Font = Enum.Font.SourceSans
+infoLabel.Text = "Tự động nhặt lại đồ ngay khi bị Boss đánh rơi, kể cả khi bị đá văng xa."
+infoLabel.ZIndex = 11
+infoLabel.Parent = popup
+
+toggleButton.MouseButton1Click:Connect(function()
+	antiDropEnabled = not antiDropEnabled
+
+	if antiDropEnabled then
+		toggleButton.Text = "Chống Rơi Đồ: BẬT"
+		toggleButton.BackgroundColor3 = Color3.fromRGB(40, 150, 60)
+	else
+		toggleButton.Text = "Chống Rơi Đồ: TẮT"
+		toggleButton.BackgroundColor3 = Color3.fromRGB(150, 40, 40)
+	end
+end)
+
+--=====================================================
+-- 3. CƠ CHẾ ANTI-DROP THEO SỰ KIỆN (EVENT-DRIVEN)
+--=====================================================
+-- Vì sao đổi cách làm:
+-- Cách quét theo bán kính quanh nhân vật sẽ THẤT BẠI khi Boss đá bay
+-- nhân vật ra xa vị trí item rơi (nhân vật đã rời khỏi bán kính quét).
+--
+-- Cách mới: theo dõi TRỰC TIẾP từng Tool mà người chơi đang sở hữu
+-- (nằm trong Backpack hoặc Character). Ngay khi Parent của Tool đó
+-- đổi thành Workspace (nghĩa là bị rơi ra đất), script phản ứng
+-- NGAY LẬP TỨC bất kể nhân vật đang ở đâu, không cần chờ vòng quét.
+
+local trackedTools = {} -- [Tool] = Connection (AncestryChanged)
+
+function trackTool(tool)
+	if trackedTools[tool] then return end -- đã theo dõi rồi thì bỏ qua
+
+	local connection
+	connection = tool.AncestryChanged:Connect(function(_, newParent)
+		-- Tool bị rơi ra Workspace trong khi Anti-Drop đang BẬT
+		if antiDropEnabled and newParent == Workspace then
+			-- Chờ 1 khung hình để đảm bảo vật lý rơi đã được server
+			-- xử lý xong (tránh giật/giằng qua lại với server)
+			task.defer(function()
+				if tool.Parent == Workspace and character and character.Parent then
+					-- Gán lại Tool vào Character -> Humanoid tự Equip
+					-- (tương đương EquipTool())
+					tool.Parent = character
+				end
+			end)
+		end
+
+		-- Tool đã bị hủy (destroy) hoặc rời khỏi người chơi hẳn -> ngừng theo dõi
+		if newParent == nil then
+			trackedTools[tool] = nil
+			connection:Disconnect()
+		end
+	end)
+
+	trackedTools[tool] = connection
+end
+
+local function untrackTool(tool)
+	local connection = trackedTools[tool]
+	if connection then
+		connection:Disconnect()
+		trackedTools[tool] = nil
+	end
+end
+
+--------------------------------------------------------
+-- Theo dõi các Tool đã có sẵn lúc script chạy
+--------------------------------------------------------
+for _, tool in ipairs(backpack:GetChildren()) do
+	if tool:IsA("Tool") then
+		trackTool(tool)
+	end
+end
+for _, tool in ipairs(character:GetChildren()) do
+	if tool:IsA("Tool") then
+		trackTool(tool)
+	end
+end
+
+--------------------------------------------------------
+-- Theo dõi các Tool MỚI được thêm vào Backpack hoặc Character
+-- (ví dụ nhặt đồ mới trong lúc chơi)
+--------------------------------------------------------
+backpack.ChildAdded:Connect(function(child)
+	if child:IsA("Tool") then
+		trackTool(child)
+	end
+end)
+
+LocalPlayer.CharacterAdded:Connect(function(newChar)
+	newChar.ChildAdded:Connect(function(child)
+		if child:IsA("Tool") then
+			trackTool(child)
+		end
+	end)
+end)
+
+character.ChildAdded:Connect(function(child)
+	if child:IsA("Tool") then
+		trackTool(child)
+	end
+end)
