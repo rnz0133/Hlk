@@ -1,0 +1,154 @@
+--=====================================================
+-- LOCAL SCRIPT: Fly Toggle (bay theo hướng camera, kể cả lên/xuống)
+-- Đặt trong StarterPlayer > StarterPlayerScripts
+--=====================================================
+
+local Players     = game:GetService("Players")
+local RunService  = game:GetService("RunService")
+local Workspace    = game:GetService("Workspace")
+
+local LocalPlayer = Players.LocalPlayer
+local camera = Workspace.CurrentCamera
+
+local character, humanoid, rootPart
+
+local flying = false
+local flySpeed = 50 -- tốc độ bay (studs/giây), có thể chỉnh tùy game
+
+-- Các object vật lý dùng để bay, tạo mới mỗi lần bật
+local bodyVelocity, bodyGyro
+local flyConnection -- kết nối Heartbeat khi đang bay
+
+--------------------------------------------------------
+-- Gắn lại nhân vật mỗi khi respawn
+--------------------------------------------------------
+local function onCharacterAdded(newChar)
+	character = newChar
+	humanoid  = character:WaitForChild("Humanoid")
+	rootPart  = character:WaitForChild("HumanoidRootPart")
+
+	if flying then
+		flying = false -- tránh lỗi vật lý khi respawn giữa lúc đang bay
+	end
+end
+
+character = LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
+onCharacterAdded(character)
+LocalPlayer.CharacterAdded:Connect(onCharacterAdded)
+
+--=====================================================
+-- 1. GIAO DIỆN (UI) - chỉ còn 1 nút BAY duy nhất
+--=====================================================
+
+local screenGui = Instance.new("ScreenGui")
+screenGui.Name = "FlyGui"
+screenGui.ResetOnSpawn = false
+screenGui.IgnoreGuiInset = true
+screenGui.Parent = LocalPlayer:WaitForChild("PlayerGui")
+
+local flyButton = Instance.new("TextButton")
+flyButton.Name = "FlyButton"
+flyButton.Size = UDim2.new(0, 55, 0, 55)
+flyButton.AnchorPoint = Vector2.new(1, 1)
+flyButton.Position = UDim2.new(1, -20, 1, -220) -- cao hơn nút nhảy mobile mặc định
+flyButton.BackgroundColor3 = Color3.fromRGB(150, 40, 40) -- đỏ = đang TẮT
+flyButton.Text = "BAY"
+flyButton.TextScaled = true
+flyButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+flyButton.Font = Enum.Font.SourceSansBold
+flyButton.ZIndex = 10
+flyButton.Parent = screenGui
+
+local flyCorner = Instance.new("UICorner")
+flyCorner.CornerRadius = UDim.new(1, 0)
+flyCorner.Parent = flyButton
+
+--=====================================================
+-- 2. CƠ CHẾ BẬT / TẮT BAY
+--=====================================================
+
+local function startFlying()
+	if not rootPart then return end
+
+	-- BodyGyro giữ nhân vật đứng thẳng, không bị xoay lung tung khi bay
+	bodyGyro = Instance.new("BodyGyro")
+	bodyGyro.MaxTorque = Vector3.new(400000, 400000, 400000)
+	bodyGyro.P = 3000
+	bodyGyro.CFrame = rootPart.CFrame
+	bodyGyro.Parent = rootPart
+
+	-- BodyVelocity đẩy nhân vật di chuyển tự do, thay thế trọng lực
+	bodyVelocity = Instance.new("BodyVelocity")
+	bodyVelocity.MaxForce = Vector3.new(math.huge, math.huge, math.huge)
+	bodyVelocity.Velocity = Vector3.new(0, 0, 0)
+	bodyVelocity.Parent = rootPart
+
+	-- Vòng lặp cập nhật hướng bay mỗi khung hình
+	flyConnection = RunService.Heartbeat:Connect(function()
+		if not rootPart or not humanoid then return end
+
+		local camCFrame = camera.CFrame
+
+		-- Vector "tiến" và "phải" đã dẹt phẳng theo trục ngang (bỏ pitch)
+		-- -> dùng để tách input joystick thành 2 thành phần độc lập
+		local flatForward = Vector3.new(camCFrame.LookVector.X, 0, camCFrame.LookVector.Z)
+		if flatForward.Magnitude > 0.001 then
+			flatForward = flatForward.Unit
+		end
+		local flatRight = Vector3.new(camCFrame.RightVector.X, 0, camCFrame.RightVector.Z)
+		if flatRight.Magnitude > 0.001 then
+			flatRight = flatRight.Unit
+		end
+
+		-- MoveDirection là hướng di chuyển ngang từ joystick ảo (đã theo hướng camera)
+		local moveDirection = humanoid.MoveDirection
+
+		-- Tách input thành: bao nhiêu % đang "đẩy tiến/lùi" và bao nhiêu % "đẩy trái/phải"
+		local forwardAmount = moveDirection:Dot(flatForward)
+		local rightAmount   = moveDirection:Dot(flatRight)
+
+		-- Áp phần "tiến/lùi" lên vector nhìn ĐẦY ĐỦ của camera (có cả góc lên/xuống)
+		-- -> nhìn lên + đẩy tiến = bay lên, nhìn xuống + đẩy tiến = bay xuống
+		local flyDirection = (camCFrame.LookVector * forwardAmount) + (flatRight * rightAmount)
+
+		if flyDirection.Magnitude > 1 then
+			flyDirection = flyDirection.Unit
+		end
+
+		bodyVelocity.Velocity = flyDirection * flySpeed
+
+		-- Giữ nhân vật thẳng đứng theo hướng camera đang nhìn ngang
+		bodyGyro.CFrame = CFrame.new(rootPart.Position, rootPart.Position + camCFrame.LookVector)
+	end)
+end
+
+local function stopFlying()
+	if flyConnection then
+		flyConnection:Disconnect()
+		flyConnection = nil
+	end
+
+	-- Xóa 2 object vật lý -> trọng lực có tác dụng trở lại,
+	-- nhân vật rơi tự do ngay lập tức
+	if bodyVelocity then
+		bodyVelocity:Destroy()
+		bodyVelocity = nil
+	end
+	if bodyGyro then
+		bodyGyro:Destroy()
+		bodyGyro = nil
+	end
+end
+
+-- Bấm nút BAY -> đảo trạng thái
+flyButton.MouseButton1Click:Connect(function()
+	flying = not flying
+
+	if flying then
+		flyButton.BackgroundColor3 = Color3.fromRGB(40, 150, 60) -- xanh = đang BẬT
+		startFlying()
+	else
+		flyButton.BackgroundColor3 = Color3.fromRGB(150, 40, 40) -- đỏ = TẮT
+		stopFlying()
+	end
+end)
