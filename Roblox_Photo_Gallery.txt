@@ -1,0 +1,453 @@
+--[[
+    Roblox Lua Photo Gallery Script (Mobile / PC Executor Compatible)
+    Features:
+    - Circular & Draggable Toggle Button (Show/Hide Main UI)
+    - Flat UI with Square Corners (CornerRadius = 0)
+    - Resizable Main Frame (Drag bottom-right corner)
+    - Tab System: "Thư viện Ảnh" (Photo Gallery) & "Hướng dẫn" (Instructions)
+    - Responsive Grid Layout (UIGridLayout + ScrollingFrame)
+    - Lightbox View (Full-screen image preview with close button)
+    - GitHub JSON Integration with Cache Bypassing (?v=tick())
+    - Image Downloading & Caching using writefile & getcustomasset
+--]]
+
+local CoreGui = game:GetService("CoreGui")
+local TweenService = game:GetService("TweenService")
+local UserInputService = game:GetService("UserInputService")
+local HttpService = game:GetService("HttpService")
+
+-- Clean up existing GUI if re-executed
+if CoreGui:FindFirstChild("PhotoGalleryGui") then
+    CoreGui.PhotoGalleryGui:Destroy()
+end
+
+-- Create ScreenGui
+local ScreenGui = Instance.new("ScreenGui")
+ScreenGui.Name = "PhotoGalleryGui"
+ScreenGui.ResetOnSpawn = false
+ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+
+-- Parent ScreenGui properly across different executors
+if gethui then
+    ScreenGui.Parent = gethui()
+elseif syn and syn.protect_gui then
+    syn.protect_gui(ScreenGui)
+    ScreenGui.Parent = CoreGui
+else
+    ScreenGui.Parent = CoreGui
+end
+
+---------------------------------------------------------
+-- HELPER FUNCTIONS FOR DRAGGING & RESIZING
+---------------------------------------------------------
+local function makeDraggable(guiElement, dragHandle)
+    dragHandle = dragHandle or guiElement
+    local dragging, dragInput, dragStart, startPos
+
+    dragHandle.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+            dragging = true
+            dragStart = input.Position
+            startPos = guiElement.Position
+
+            input.Changed:Connect(function()
+                if input.UserInputState == Enum.UserInputState.End then
+                    dragging = false
+                end
+            end)
+        end
+    end)
+
+    dragHandle.InputChanged:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then
+            dragInput = input
+        end
+    end)
+
+    UserInputService.InputChanged:Connect(function(input)
+        if input == dragInput and dragging then
+            local delta = input.Position - dragStart
+            guiElement.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
+        end
+    end)
+end
+
+local function makeResizable(frame, resizeHandle, minSize)
+    minSize = minSize or Vector2.new(300, 200)
+    local resizing, resizeInput, resizeStart, startSize
+
+    resizeHandle.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+            resizing = true
+            resizeStart = input.Position
+            startSize = frame.Size
+
+            input.Changed:Connect(function()
+                if input.UserInputState == Enum.UserInputState.End then
+                    resizing = false
+                end
+            end)
+        end
+    end)
+
+    resizeHandle.InputChanged:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then
+            resizeInput = input
+        end
+    end)
+
+    UserInputService.InputChanged:Connect(function(input)
+        if input == resizeInput and resizing then
+            local delta = input.Position - resizeStart
+            local newX = math.max(minSize.X, startSize.X.Offset + delta.X)
+            local newY = math.max(minSize.Y, startSize.Y.Offset + delta.Y)
+            frame.Size = UDim2.new(startSize.X.Scale, newX, startSize.Y.Scale, newY)
+        end
+    end)
+end
+
+---------------------------------------------------------
+-- 1. CIRCULAR & DRAGGABLE TOGGLE BUTTON
+---------------------------------------------------------
+local ToggleButton = Instance.new("TextButton")
+ToggleButton.Name = "ToggleButton"
+ToggleButton.Parent = ScreenGui
+ToggleButton.Size = UDim2.new(0, 50, 0, 50)
+ToggleButton.Position = UDim2.new(0.05, 0, 0.2, 0)
+ToggleButton.BackgroundColor3 = Color3.fromRGB(35, 35, 45)
+ToggleButton.BorderSizePixel = 0
+ToggleButton.Text = "📷"
+ToggleButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+ToggleButton.TextSize = 22
+ToggleButton.Font = Enum.Font.SourceSansBold
+ToggleButton.ZIndex = 10
+
+-- Make completely circular
+local UICornerToggle = Instance.new("UICorner")
+UICornerToggle.CornerRadius = UDim.new(1, 0)
+UICornerToggle.Parent = ToggleButton
+
+-- Make Toggle Button Draggable
+makeDraggable(ToggleButton)
+
+---------------------------------------------------------
+-- 2. MAIN FRAME (SQUARE, FLAT, NO HEADER)
+---------------------------------------------------------
+local MainFrame = Instance.new("Frame")
+MainFrame.Name = "MainFrame"
+MainFrame.Parent = ScreenGui
+MainFrame.Size = UDim2.new(0, 520, 0, 360)
+MainFrame.Position = UDim2.new(0.5, -260, 0.5, -180)
+MainFrame.BackgroundColor3 = Color3.fromRGB(24, 24, 28)
+MainFrame.BorderSizePixel = 0
+MainFrame.Visible = true
+
+-- Make Main Frame Draggable (drag anywhere near the top region)
+makeDraggable(MainFrame)
+
+-- Toggle Visibility
+ToggleButton.MouseButton1Click:Connect(function()
+    MainFrame.Visible = not MainFrame.Visible
+end)
+
+-- Resize Grip / Handle at bottom-right
+local ResizeHandle = Instance.new("TextButton")
+ResizeHandle.Name = "ResizeHandle"
+ResizeHandle.Parent = MainFrame
+ResizeHandle.Size = UDim2.new(0, 16, 0, 16)
+ResizeHandle.Position = UDim2.new(1, -16, 1, -16)
+ResizeHandle.BackgroundColor3 = Color3.fromRGB(50, 50, 60)
+ResizeHandle.BorderSizePixel = 0
+ResizeHandle.Text = "◢"
+ResizeHandle.TextColor3 = Color3.fromRGB(180, 180, 180)
+ResizeHandle.TextSize = 12
+ResizeHandle.ZIndex = 8
+makeResizable(MainFrame, ResizeHandle, Vector2.new(350, 250))
+
+-- Top Control Bar (Tabs + Close Button)
+local TopBar = Instance.new("Frame")
+TopBar.Name = "TopBar"
+TopBar.Parent = MainFrame
+TopBar.Size = UDim2.new(1, 0, 0, 35)
+TopBar.BackgroundColor3 = Color3.fromRGB(18, 18, 22)
+TopBar.BorderSizePixel = 0
+
+-- Close Button "X"
+local CloseButton = Instance.new("TextButton")
+CloseButton.Name = "CloseButton"
+CloseButton.Parent = TopBar
+CloseButton.Size = UDim2.new(0, 35, 1, 0)
+CloseButton.Position = UDim2.new(1, -35, 0, 0)
+CloseButton.BackgroundColor3 = Color3.fromRGB(200, 50, 50)
+CloseButton.BorderSizePixel = 0
+CloseButton.Text = "✕"
+CloseButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+CloseButton.TextSize = 16
+CloseButton.Font = Enum.Font.SourceSansBold
+
+CloseButton.MouseButton1Click:Connect(function()
+    MainFrame.Visible = false
+end)
+
+-- Tab Container
+local TabContainer = Instance.new("Frame")
+TabContainer.Name = "TabContainer"
+TabContainer.Parent = TopBar
+TabContainer.Size = UDim2.new(1, -40, 1, 0)
+TabContainer.BackgroundTransparency = 1
+
+local TabListLayout = Instance.new("UIListLayout")
+TabListLayout.Parent = TabContainer
+TabListLayout.FillDirection = Enum.FillDirection.Horizontal
+TabListLayout.SortOrder = Enum.SortOrder.LayoutOrder
+
+-- Tab 1 Button
+local Tab1Button = Instance.new("TextButton")
+Tab1Button.Name = "Tab1Button"
+Tab1Button.Parent = TabContainer
+Tab1Button.Size = UDim2.new(0, 130, 1, 0)
+Tab1Button.BackgroundColor3 = Color3.fromRGB(32, 32, 40)
+Tab1Button.BorderSizePixel = 0
+Tab1Button.Text = "Thư viện Ảnh"
+Tab1Button.TextColor3 = Color3.fromRGB(255, 255, 255)
+Tab1Button.Font = Enum.Font.SourceSansBold
+Tab1Button.TextSize = 14
+
+-- Tab 2 Button
+local Tab2Button = Instance.new("TextButton")
+Tab2Button.Name = "Tab2Button"
+Tab2Button.Parent = TabContainer
+Tab2Button.Size = UDim2.new(0, 130, 1, 0)
+Tab2Button.BackgroundColor3 = Color3.fromRGB(24, 24, 28)
+Tab2Button.BorderSizePixel = 0
+Tab2Button.Text = "Hướng dẫn"
+Tab2Button.TextColor3 = Color3.fromRGB(150, 150, 160)
+Tab2Button.Font = Enum.Font.SourceSans
+Tab2Button.TextSize = 14
+
+---------------------------------------------------------
+-- CONTENT FRAMES
+---------------------------------------------------------
+local ContentContainer = Instance.new("Frame")
+ContentContainer.Name = "ContentContainer"
+ContentContainer.Parent = MainFrame
+ContentContainer.Size = UDim2.new(1, 0, 1, -35)
+ContentContainer.Position = UDim2.new(0, 0, 0, 35)
+ContentContainer.BackgroundTransparency = 1
+
+-- Tab 1 Content: Photo Gallery Scroll
+local GalleryFrame = Instance.new("ScrollingFrame")
+GalleryFrame.Name = "GalleryFrame"
+GalleryFrame.Parent = ContentContainer
+GalleryFrame.Size = UDim2.new(1, -10, 1, -10)
+GalleryFrame.Position = UDim2.new(0, 5, 0, 5)
+GalleryFrame.BackgroundTransparency = 1
+GalleryFrame.BorderSizePixel = 0
+GalleryFrame.ScrollBarThickness = 6
+GalleryFrame.ScrollBarImageColor3 = Color3.fromRGB(80, 80, 100)
+GalleryFrame.CanvasSize = UDim2.new(0, 0, 0, 0)
+
+local GridLayout = Instance.new("UIGridLayout")
+GridLayout.Parent = GalleryFrame
+GridLayout.CellPadding = UDim2.new(0, 8, 0, 8)
+GridLayout.CellSize = UDim2.new(0, 115, 0, 115)
+GridLayout.SortOrder = Enum.SortOrder.LayoutOrder
+
+-- Auto-adjust CanvasSize based on content
+local function updateCanvasSize()
+    GalleryFrame.CanvasSize = UDim2.new(0, 0, 0, GridLayout.AbsoluteContentSize.Y + 10)
+end
+GridLayout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(updateCanvasSize)
+
+-- Tab 2 Content: Instructions
+local InstructionFrame = Instance.new("Frame")
+InstructionFrame.Name = "InstructionFrame"
+InstructionFrame.Parent = ContentContainer
+InstructionFrame.Size = UDim2.new(1, -20, 1, -20)
+InstructionFrame.Position = UDim2.new(0, 10, 0, 10)
+InstructionFrame.BackgroundTransparency = 1
+InstructionFrame.Visible = false
+
+local InstructionText = Instance.new("TextLabel")
+InstructionText.Parent = InstructionFrame
+InstructionText.Size = UDim2.new(1, 0, 1, 0)
+InstructionText.BackgroundTransparency = 1
+InstructionText.TextColor3 = Color3.fromRGB(220, 220, 230)
+InstructionText.TextSize = 14
+InstructionText.Font = Enum.Font.SourceSans
+InstructionText.TextXAlignment = Enum.TextXAlignment.Left
+InstructionText.TextYAlignment = Enum.TextYAlignment.Top
+InstructionText.TextWrapped = true
+InstructionText.Text = [[
+📌 HƯỚNG DẪN SỬ DỤNG GIAO DIỆN THƯ VIỆN ẢNH:
+
+1. Xem ảnh phóng to (Lightbox):
+   • Bấm/Chạm trực tiếp vào bất cứ hình ảnh thumbnail nào trong danh sách.
+   • Hình ảnh sẽ hiển thị toàn màn hình với chất lượng cao.
+   • Bấm vào nút "✕" ở góc trên bên phải giao diện xem to để đóng lại.
+
+2. Co giãn cửa sổ (Resize):
+   • Nhấp/Giữ và kéo góc dưới bên phải (nút hình tam giác ◢) của bảng điều khiển để phóng to hoặc thu nhỏ khung theo ý muốn.
+   • Danh sách lưới ảnh sẽ tự động điều chỉnh theo kích thước mới.
+
+3. Ẩn / Hiện giao diện:
+   • Kéo nút tròn 📷 đến bất kỳ vị trí nào thuận tiện trên màn hình.
+   • Bấm nút tròn 📷 hoặc nút "✕" ở góc trên cùng bên phải để ẩn/hiện giao diện.
+]]
+
+---------------------------------------------------------
+-- TAB SWITCHING LOGIC
+---------------------------------------------------------
+Tab1Button.MouseButton1Click:Connect(function()
+    GalleryFrame.Visible = true
+    InstructionFrame.Visible = false
+    
+    Tab1Button.BackgroundColor3 = Color3.fromRGB(32, 32, 40)
+    Tab1Button.TextColor3 = Color3.fromRGB(255, 255, 255)
+    Tab1Button.Font = Enum.Font.SourceSansBold
+    
+    Tab2Button.BackgroundColor3 = Color3.fromRGB(24, 24, 28)
+    Tab2Button.TextColor3 = Color3.fromRGB(150, 150, 160)
+    Tab2Button.Font = Enum.Font.SourceSans
+end)
+
+Tab2Button.MouseButton1Click:Connect(function()
+    GalleryFrame.Visible = false
+    InstructionFrame.Visible = true
+    
+    Tab2Button.BackgroundColor3 = Color3.fromRGB(32, 32, 40)
+    Tab2Button.TextColor3 = Color3.fromRGB(255, 255, 255)
+    Tab2Button.Font = Enum.Font.SourceSansBold
+    
+    Tab1Button.BackgroundColor3 = Color3.fromRGB(24, 24, 28)
+    Tab1Button.TextColor3 = Color3.fromRGB(150, 150, 160)
+    Tab1Button.Font = Enum.Font.SourceSans
+end)
+
+---------------------------------------------------------
+-- 3. LIGHTBOX VIEW (FULL-SCREEN PREVIEW)
+---------------------------------------------------------
+local Lightbox = Instance.new("Frame")
+Lightbox.Name = "Lightbox"
+Lightbox.Parent = ScreenGui
+Lightbox.Size = UDim2.new(1, 0, 1, 0)
+Lightbox.Position = UDim2.new(0, 0, 0, 0)
+Lightbox.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
+Lightbox.BackgroundTransparency = 0.3
+Lightbox.Visible = false
+Lightbox.ZIndex = 20
+
+local LightboxImage = Instance.new("ImageLabel")
+LightboxImage.Parent = Lightbox
+LightboxImage.Size = UDim2.new(0.8, 0, 0.8, 0)
+LightboxImage.Position = UDim2.new(0.1, 0, 0.1, 0)
+LightboxImage.BackgroundColor3 = Color3.fromRGB(15, 15, 20)
+LightboxImage.BorderSizePixel = 0
+LightboxImage.ScaleType = Enum.ScaleType.Fit
+LightboxImage.ZIndex = 21
+
+local LightboxClose = Instance.new("TextButton")
+LightboxClose.Name = "LightboxClose"
+LightboxClose.Parent = Lightbox
+LightboxClose.Size = UDim2.new(0, 40, 0, 40)
+LightboxClose.Position = UDim2.new(0.9, -45, 0.05, 0)
+LightboxClose.BackgroundColor3 = Color3.fromRGB(220, 50, 50)
+LightboxClose.BorderSizePixel = 0
+LightboxClose.Text = "✕"
+LightboxClose.TextColor3 = Color3.fromRGB(255, 255, 255)
+LightboxClose.TextSize = 22
+LightboxClose.Font = Enum.Font.SourceSansBold
+LightboxClose.ZIndex = 22
+
+LightboxClose.MouseButton1Click:Connect(function()
+    Lightbox.Visible = false
+end)
+
+local function openLightbox(assetId)
+    LightboxImage.Image = assetId
+    Lightbox.Visible = true
+end
+
+---------------------------------------------------------
+-- 4. DATABASE FETCHING & ASSET CACHING
+---------------------------------------------------------
+local function getAssetFromFileOrUrl(url, filename)
+    filename = "PhotoGallery_Cache/" .. filename
+    
+    if not isfolder("PhotoGallery_Cache") then
+        makefolder("PhotoGallery_Cache")
+    end
+    
+    if isfile(filename) then
+        return getcustomasset(filename)
+    else
+        local success, result = pcall(function()
+            return game:HttpGet(url)
+        end)
+        if success and result then
+            writefile(filename, result)
+            return getcustomasset(filename)
+        end
+    end
+    return ""
+end
+
+local function loadGallery()
+    -- Anti-cache JSON fetch using ?v=tick()
+    local jsonUrl = "https://raw.githubusercontent.com/rnz0133/Hlk/refs/heads/main/link-anh.json?v=" .. tick()
+    
+    task.spawn(function()
+        local success, response = pcall(function()
+            return game:HttpGet(jsonUrl)
+        end)
+        
+        if not success or not response then
+            warn("Lỗi tải JSON từ Database!")
+            return
+        end
+        
+        local parseSuccess, data = pcall(function()
+            return HttpService:JSONDecode(response)
+        end)
+        
+        if not parseSuccess or type(data) ~= "table" then
+            warn("Lỗi giải mã JSON!")
+            return
+        end
+        
+        -- Support both array of strings OR array of objects with 'url'/'link' key
+        local imageList = {}
+        for _, item in ipairs(data) do
+            if type(item) == "string" then
+                table.insert(imageList, item)
+            elseif type(item) == "table" and (item.url or item.link or item.image) then
+                table.insert(imageList, item.url or item.link or item.image)
+            end
+        end
+        
+        -- Create Image Buttons in Grid
+        for idx, imgUrl in ipairs(imageList) do
+            task.spawn(function()
+                local fileName = "img_" .. tostring(idx) .. "_" .. string.sub(HttpService:GenerateGUID(false), 1, 8) .. ".png"
+                local assetId = getAssetFromFileOrUrl(imgUrl, fileName)
+                
+                if assetId ~= "" then
+                    local ImageBtn = Instance.new("ImageButton")
+                    ImageBtn.Name = "Img_" .. tostring(idx)
+                    ImageBtn.Parent = GalleryFrame
+                    ImageBtn.BackgroundColor3 = Color3.fromRGB(35, 35, 45)
+                    ImageBtn.BorderSizePixel = 0
+                    ImageBtn.ScaleType = Enum.ScaleType.Crop
+                    ImageBtn.Image = assetId
+                    
+                    ImageBtn.MouseButton1Click:Connect(function()
+                        openLightbox(assetId)
+                    end)
+                end
+            end)
+        end
+    end)
+end
+
+-- Initialize Gallery Load
+loadGallery()
