@@ -1,0 +1,294 @@
+--=====================================================
+-- LOCAL SCRIPT: Fly Toggle + Popup chỉnh tốc độ bay
+-- Đặt trong StarterPlayer > StarterPlayerScripts
+--=====================================================
+
+local Players     = game:GetService("Players")
+local RunService  = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local Workspace    = game:GetService("Workspace")
+
+local LocalPlayer = Players.LocalPlayer
+local camera = Workspace.CurrentCamera
+
+local character, humanoid, rootPart
+
+local flying = false
+local flySpeed = 50      -- tốc độ bay hiện tại
+local MIN_SPEED = 20
+local MAX_SPEED = 300     -- kéo được lên tới rất nhanh
+
+-- Các object vật lý dùng để bay
+local bodyVelocity, bodyGyro
+local flyConnection
+
+--------------------------------------------------------
+-- Gắn lại nhân vật mỗi khi respawn
+--------------------------------------------------------
+local function onCharacterAdded(newChar)
+	character = newChar
+	humanoid  = character:WaitForChild("Humanoid")
+	rootPart  = character:WaitForChild("HumanoidRootPart")
+
+	if flying then
+		flying = false
+	end
+end
+
+character = LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
+onCharacterAdded(character)
+LocalPlayer.CharacterAdded:Connect(onCharacterAdded)
+
+--=====================================================
+-- 1. GIAO DIỆN (UI)
+--=====================================================
+
+local screenGui = Instance.new("ScreenGui")
+screenGui.Name = "FlyGui"
+screenGui.ResetOnSpawn = false
+screenGui.IgnoreGuiInset = true
+screenGui.Parent = LocalPlayer:WaitForChild("PlayerGui")
+
+--------------------------------------------------------
+-- Nút tròn chính (mở/đóng popup) - góc dưới-phải, tránh joystick mobile
+--------------------------------------------------------
+local mainButton = Instance.new("TextButton")
+mainButton.Name = "MainButton"
+mainButton.Size = UDim2.new(0, 55, 0, 55)
+mainButton.AnchorPoint = Vector2.new(1, 1)
+mainButton.Position = UDim2.new(1, -20, 1, -220)
+mainButton.BackgroundColor3 = Color3.fromRGB(150, 40, 40) -- đỏ = đang TẮT bay
+mainButton.Text = "BAY"
+mainButton.TextScaled = true
+mainButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+mainButton.Font = Enum.Font.SourceSansBold
+mainButton.ZIndex = 10
+mainButton.Parent = screenGui
+
+local mainCorner = Instance.new("UICorner")
+mainCorner.CornerRadius = UDim.new(1, 0)
+mainCorner.Parent = mainButton
+
+--------------------------------------------------------
+-- Popup (220 x 150) - neo phía trên nút tròn, luôn nằm trong màn hình
+--------------------------------------------------------
+local popup = Instance.new("Frame")
+popup.Name = "PopupMenu"
+popup.Size = UDim2.new(0, 220, 0, 150)
+popup.AnchorPoint = Vector2.new(1, 1)
+popup.Position = UDim2.new(1, -20, 1, -285) -- ngay trên nút tròn
+popup.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
+popup.BorderSizePixel = 0
+popup.Visible = false
+popup.ZIndex = 10
+popup.Parent = screenGui
+
+local popupCorner = Instance.new("UICorner")
+popupCorner.CornerRadius = UDim.new(0, 12)
+popupCorner.Parent = popup
+
+local popupPadding = Instance.new("UIPadding")
+popupPadding.PaddingTop = UDim.new(0, 10)
+popupPadding.PaddingBottom = UDim.new(0, 10)
+popupPadding.PaddingLeft = UDim.new(0, 12)
+popupPadding.PaddingRight = UDim.new(0, 12)
+popupPadding.Parent = popup
+
+-- Bấm nút tròn -> chỉ ẩn/hiện popup (KHÔNG bật/tắt bay trực tiếp nữa)
+mainButton.MouseButton1Click:Connect(function()
+	popup.Visible = not popup.Visible
+end)
+
+--------------------------------------------------------
+-- Nút BẬT/TẮT Bay (nằm trong popup)
+--------------------------------------------------------
+local toggleButton = Instance.new("TextButton")
+toggleButton.Name = "FlyToggle"
+toggleButton.Size = UDim2.new(1, 0, 0, 40)
+toggleButton.Position = UDim2.new(0, 0, 0, 0)
+toggleButton.BackgroundColor3 = Color3.fromRGB(150, 40, 40) -- đỏ = TẮT
+toggleButton.Text = "Bay: TẮT"
+toggleButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+toggleButton.TextScaled = true
+toggleButton.Font = Enum.Font.SourceSansBold
+toggleButton.ZIndex = 11
+toggleButton.Parent = popup
+
+local toggleCorner = Instance.new("UICorner")
+toggleCorner.CornerRadius = UDim.new(0, 8)
+toggleCorner.Parent = toggleButton
+
+--------------------------------------------------------
+-- Nhãn hiển thị tốc độ hiện tại
+--------------------------------------------------------
+local speedLabel = Instance.new("TextLabel")
+speedLabel.Name = "SpeedLabel"
+speedLabel.Size = UDim2.new(1, 0, 0, 22)
+speedLabel.Position = UDim2.new(0, 0, 0, 52)
+speedLabel.BackgroundTransparency = 1
+speedLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
+speedLabel.TextScaled = true
+speedLabel.Font = Enum.Font.SourceSansBold
+speedLabel.TextXAlignment = Enum.TextXAlignment.Left
+speedLabel.Text = "Tốc độ bay: " .. flySpeed
+speedLabel.ZIndex = 11
+speedLabel.Parent = popup
+
+--------------------------------------------------------
+-- Thanh trượt (Slider) chỉnh tốc độ bay
+--------------------------------------------------------
+local sliderTrack = Instance.new("Frame")
+sliderTrack.Name = "SliderTrack"
+sliderTrack.Size = UDim2.new(1, 0, 0, 8)
+sliderTrack.Position = UDim2.new(0, 0, 0, 90)
+sliderTrack.BackgroundColor3 = Color3.fromRGB(70, 70, 70)
+sliderTrack.BorderSizePixel = 0
+sliderTrack.ZIndex = 11
+sliderTrack.Parent = popup
+
+local sliderTrackCorner = Instance.new("UICorner")
+sliderTrackCorner.CornerRadius = UDim.new(1, 0)
+sliderTrackCorner.Parent = sliderTrack
+
+local sliderKnob = Instance.new("Frame")
+sliderKnob.Name = "SliderKnob"
+sliderKnob.Size = UDim2.new(0, 24, 0, 24)
+sliderKnob.AnchorPoint = Vector2.new(0.5, 0.5)
+sliderKnob.Position = UDim2.new(0, 0, 0.5, 0)
+sliderKnob.BackgroundColor3 = Color3.fromRGB(255, 200, 0)
+sliderKnob.ZIndex = 12
+sliderKnob.Parent = sliderTrack
+
+local knobCorner = Instance.new("UICorner")
+knobCorner.CornerRadius = UDim.new(1, 0)
+knobCorner.Parent = sliderKnob
+
+-- Cập nhật flySpeed theo % vị trí trên thanh trượt (0 -> 1)
+local function updateSpeedFromAlpha(alpha)
+	alpha = math.clamp(alpha, 0, 1)
+	flySpeed = math.floor(MIN_SPEED + (MAX_SPEED - MIN_SPEED) * alpha)
+
+	sliderKnob.Position = UDim2.new(alpha, 0, 0.5, 0)
+	speedLabel.Text = "Tốc độ bay: " .. flySpeed
+end
+
+-- Khởi tạo vị trí knob theo flySpeed mặc định
+updateSpeedFromAlpha((flySpeed - MIN_SPEED) / (MAX_SPEED - MIN_SPEED))
+
+local draggingSlider = false
+
+local function beginDrag()
+	draggingSlider = true
+end
+local function endDrag()
+	draggingSlider = false
+end
+
+sliderTrack.InputBegan:Connect(function(input)
+	if input.UserInputType == Enum.UserInputType.Touch
+		or input.UserInputType == Enum.UserInputType.MouseButton1 then
+		beginDrag()
+	end
+end)
+sliderKnob.InputBegan:Connect(function(input)
+	if input.UserInputType == Enum.UserInputType.Touch
+		or input.UserInputType == Enum.UserInputType.MouseButton1 then
+		beginDrag()
+	end
+end)
+UserInputService.InputEnded:Connect(function(input)
+	if input.UserInputType == Enum.UserInputType.Touch
+		or input.UserInputType == Enum.UserInputType.MouseButton1 then
+		endDrag()
+	end
+end)
+
+UserInputService.InputChanged:Connect(function(input)
+	if not draggingSlider then return end
+	if input.UserInputType ~= Enum.UserInputType.Touch
+		and input.UserInputType ~= Enum.UserInputType.MouseMovement then
+		return
+	end
+
+	local trackAbsPos = sliderTrack.AbsolutePosition.X
+	local trackAbsSize = sliderTrack.AbsoluteSize.X
+	local inputX = input.Position.X
+
+	local alpha = (inputX - trackAbsPos) / trackAbsSize
+	updateSpeedFromAlpha(alpha)
+end)
+
+--=====================================================
+-- 2. CƠ CHẾ BẬT / TẮT BAY (bay theo hướng camera, kể cả lên/xuống)
+--=====================================================
+
+local function startFlying()
+	if not rootPart then return end
+
+	bodyGyro = Instance.new("BodyGyro")
+	bodyGyro.MaxTorque = Vector3.new(400000, 400000, 400000)
+	bodyGyro.P = 3000
+	bodyGyro.CFrame = rootPart.CFrame
+	bodyGyro.Parent = rootPart
+
+	bodyVelocity = Instance.new("BodyVelocity")
+	bodyVelocity.MaxForce = Vector3.new(math.huge, math.huge, math.huge)
+	bodyVelocity.Velocity = Vector3.new(0, 0, 0)
+	bodyVelocity.Parent = rootPart
+
+	flyConnection = RunService.Heartbeat:Connect(function()
+		if not rootPart or not humanoid then return end
+
+		local camCFrame = camera.CFrame
+
+		local flatForward = Vector3.new(camCFrame.LookVector.X, 0, camCFrame.LookVector.Z)
+		if flatForward.Magnitude > 0.001 then flatForward = flatForward.Unit end
+		local flatRight = Vector3.new(camCFrame.RightVector.X, 0, camCFrame.RightVector.Z)
+		if flatRight.Magnitude > 0.001 then flatRight = flatRight.Unit end
+
+		local moveDirection = humanoid.MoveDirection
+		local forwardAmount = moveDirection:Dot(flatForward)
+		local rightAmount   = moveDirection:Dot(flatRight)
+
+		-- Dùng flySpeed hiện tại (đang được slider cập nhật real-time)
+		local flyDirection = (camCFrame.LookVector * forwardAmount) + (flatRight * rightAmount)
+		if flyDirection.Magnitude > 1 then
+			flyDirection = flyDirection.Unit
+		end
+
+		bodyVelocity.Velocity = flyDirection * flySpeed
+		bodyGyro.CFrame = CFrame.new(rootPart.Position, rootPart.Position + camCFrame.LookVector)
+	end)
+end
+
+local function stopFlying()
+	if flyConnection then
+		flyConnection:Disconnect()
+		flyConnection = nil
+	end
+	if bodyVelocity then
+		bodyVelocity:Destroy()
+		bodyVelocity = nil
+	end
+	if bodyGyro then
+		bodyGyro:Destroy()
+		bodyGyro = nil
+	end
+end
+
+-- Bấm nút BẬT/TẮT bay bên trong popup
+toggleButton.MouseButton1Click:Connect(function()
+	flying = not flying
+
+	if flying then
+		toggleButton.Text = "Bay: BẬT"
+		toggleButton.BackgroundColor3 = Color3.fromRGB(40, 150, 60)
+		mainButton.BackgroundColor3 = Color3.fromRGB(40, 150, 60) -- nút chính cũng đổi màu để biết đang bay
+		startFlying()
+	else
+		toggleButton.Text = "Bay: TẮT"
+		toggleButton.BackgroundColor3 = Color3.fromRGB(150, 40, 40)
+		mainButton.BackgroundColor3 = Color3.fromRGB(150, 40, 40)
+		stopFlying()
+	end
+end)
